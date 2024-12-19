@@ -80,6 +80,16 @@ async function createWindow() {
     }
   });
 
+  // 清除缓存
+  const clearObj:Electron.ClearStorageDataOptions = {
+    // "filesystem" | "localstorage" | "shadercache" | "websql" | "serviceworkers" | "cachestorage" | "cookies" | "indexdb"
+    storages: ['filesystem', 'localstorage', 'shadercache', 'websql', 'serviceworkers', 'cachestorage', 'cookies'],
+  };
+  //在主进程里面调用示例代码
+  if (win) {
+    win.webContents.session.clearStorageData(clearObj);
+  }
+
   if (process.env.VITE_DEV_SERVER_URL) {
     // electron-vite-vue#298
     win.loadURL(url);

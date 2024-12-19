@@ -4,7 +4,6 @@ import Axios, {
   type CustomParamsSerializer
 } from "axios";
 import type {
-  PureHttpError,
   RequestMethods,
   PureHttpResponse,
   PureHttpRequestConfig
@@ -12,6 +11,7 @@ import type {
 import {stringify} from "qs";
 import {getToken, formatToken} from "@/utils/auth";
 import {useUserStoreHook} from "@/store/modules/user";
+
 const net = require("net")
 
 // 相关配置请参考：www.axios-js.com/zh-cn/docs/#axios-request-config-1
@@ -61,22 +61,73 @@ class PureHttp {
   private httpInterceptorsRequest(): void {
     PureHttp.axiosInstance.interceptors.request.use(
       async (config: PureHttpRequestConfig): Promise<any> => {
-        // 开启进度条动画
-        // NProgress.start();
+        await Promise.reject({config: config})
+      },
+      error => {
+        return Promise.reject(error);
+      }
+    );
+  }
+
+  /** 响应拦截 */
+  private httpInterceptorsResponse(): void {
+    const instance = PureHttp.axiosInstance;
+    instance.interceptors.response.use((response: PureHttpResponse) => {
+        const $config = response.config;
         // 优先判断post/get等方法是否传入回调，否则执行初始化设置等回调
-        if (typeof config.beforeRequestCallback === "function") {
-          config.beforeRequestCallback(config);
-          return config;
+        if (typeof $config.beforeResponseCallback === "function") {
+          $config.beforeResponseCallback(response);
+          return response.data;
+        }
+        if (PureHttp.initConfig.beforeResponseCallback) {
+          PureHttp.initConfig.beforeResponseCallback(response);
+          return response.data;
+        }
+        return response.data;
+      },
+      (error) => {
+        // 前面请求拦截拒绝，一定会进来这边
+        const $config = error.config;
+
+        // 优先判断post/get等方法是否传入回调，否则执行初始化设置等回调
+        if (typeof $config.beforeRequestCallback === "function") {
+          $config.beforeRequestCallback($config);
+          return new Promise((resolve, reject) => {
+            this.sendRequest($config, (err, data) => {
+              if (err) {
+                console.error("An error occurred:", err);
+                reject(err)
+              } else {
+                resolve(this.getResponseData(data))
+              }
+            })
+          });
         }
         if (PureHttp.initConfig.beforeRequestCallback) {
-          PureHttp.initConfig.beforeRequestCallback(config);
-          return config;
+          PureHttp.initConfig.beforeRequestCallback($config);
+          return new Promise((resolve, reject) => {
+            this.sendRequest($config, (err, data) => {
+              if (err) {
+                console.error("An error occurred:", err);
+                reject(err)
+              } else {
+                resolve(this.getResponseData(data))
+              }
+            })
+          });
         }
         /** 请求白名单，放置一些不需要`token`的接口（通过设置请求白名单，防止`token`过期后再请求造成的死循环问题） */
         const whiteList = ["/refresh-token", "/login"];
-        return whiteList.some(url => config.url.endsWith(url))
+        return whiteList.some(url => $config.url.endsWith(url))
           ? new Promise((resolve, reject) => {
-            reject('Request cancelled by interceptor')
+            this.sendRequest($config, (err, data) => {
+              if (err) {
+                console.error("An error occurred:", err);
+                reject(err)
+              } else {
+                resolve(this.getResponseData(data))
+              }
+            })
           })
           : new Promise((resolve, reject) => {
             const data = getToken();
@@ -91,7 +142,7 @@ class PureHttp {
                     .handRefreshToken({refreshToken: data.refreshToken})
                     .then(res => {
                       const token = res.data.accessToken;
-                      config.headers["Authorization"] = formatToken(token);
+                      $config.headers["Authorization"] = formatToken(token);
                       PureHttp.requests.forEach(cb => cb(token));
                       PureHttp.requests = [];
                     })
@@ -99,55 +150,42 @@ class PureHttp {
                       PureHttp.isRefreshing = false;
                     });
                 }
-                resolve(PureHttp.retryOriginalRequest(config));
+                resolve(PureHttp.retryOriginalRequest($config));
               } else {
-                config.headers["Authorization"] = formatToken(
+                $config.headers["Authorization"] = formatToken(
                   data.accessToken
                 );
-                resolve(this.SendTcpRequest(config));
+                this.sendRequest($config, (err, data) => {
+                  if (err) {
+                    reject(err)
+                  } else {
+                    resolve(this.getResponseData(data))
+                  }
+                })
               }
             } else {
-              resolve(this.SendTcpRequest(config));
+              this.sendRequest($config, (err, data) => {
+                if (err) {
+                  reject(err)
+                } else {
+                  resolve(this.getResponseData(data))
+                }
+              })
             }
           });
-      },
-      error => {
-        return Promise.reject(error);
       }
     );
   }
 
-  /** 响应拦截 */
-  private httpInterceptorsResponse(): void {
-    const instance = PureHttp.axiosInstance;
-    instance.interceptors.response.use(
-      (response: PureHttpResponse) => {
-        const $config = response.config;
-        // 关闭进度条动画
-        // NProgress.done();
-        // 优先判断post/get等方法是否传入回调，否则执行初始化设置等回调
-        if (typeof $config.beforeResponseCallback === "function") {
-          $config.beforeResponseCallback(response);
-          return response.data;
-        }
-        if (PureHttp.initConfig.beforeResponseCallback) {
-          PureHttp.initConfig.beforeResponseCallback(response);
-          return response.data;
-        }
-        return response.data;
-      },
-      (error: PureHttpError) => {
-        const $error = error;
-        $error.isCancelRequest = Axios.isCancel($error);
-        // 关闭进度条动画
-        // NProgress.done();
-        // 所有的响应异常 区分来源为取消请求/非取消请求
-        return Promise.reject($error);
-      }
-    );
+  private getResponseData(data) {
+    let resp = new Buffer(data, 'base64').toString("utf-8");
+    console.log('response data: ', resp)
+    let failedData = {"success": false, "message": "获取数据失败"}
+    let r = resp ? JSON.parse(resp) : failedData
+    return r && r.data ? JSON.parse(JSON.parse(r.data)) : failedData
   }
 
-  private SendTcpRequest(config) {
+  private sendRequest(config, callback) {
     // 提取请求信息
     const method = config.method.toUpperCase();  // 请求方法（GET、POST 等）
     const url = config.url;                      // 请求的 URL
@@ -166,31 +204,32 @@ class PureHttp {
 
     // 打印 TCP 请求报文（你可以在这里做日志记录等处理）
     console.log('TCP Request:', httpRequest);
-
-    this.sendTcpRequest(httpRequest)
+    this.sendTcp(httpRequest, callback)
   }
 
   // TCP 客户端函数，模拟发送 HTTP 请求的 TCP 报文
-  private sendTcpRequest(httpRequest) {
+  private sendTcp(httpRequest, callback) {
     const client = new net.Socket();
 
-    client.connect(80, 'example.com', () => {
-      console.log('Connected to server');
-      // 将 HTTP 请求报文发送到服务器
-      client.write(httpRequest);
+    client.connect(8081, "127.0.0.1", () => {
+      console.log("Connected to server");
+      client.write(new Buffer(httpRequest).toString('base64'));
     });
 
-    client.on('data', (data) => {
-      console.log('Received from server:', data.toString());
+    client.on("data", data => {
+      // 调用回调函数并传递数据
+      callback(null, data.toString());
       client.destroy(); // 数据接收完成后关闭连接
     });
 
-    client.on('close', () => {
-      console.log('Connection closed');
+    client.on("close", () => {
+      console.log("Connection closed");
     });
 
-    client.on('error', (err) => {
-      console.error('TCP Error:', err);
+    client.on("error", err => {
+      console.error("TCP Error:", err);
+      // 如果发生错误，也调用回调函数并传递错误
+      callback(err, null);
     });
   }
 
@@ -237,6 +276,33 @@ class PureHttp {
     config?: PureHttpRequestConfig
   ): Promise<T> {
     return this.request<T>("get", url, params, config);
+  }
+
+  /** 单独抽离的`put`工具函数 */
+  public put<T, P>(
+    url: string,
+    params?: AxiosRequestConfig<P>,
+    config?: PureHttpRequestConfig
+  ): Promise<T> {
+    return this.request<T>("put", url, params, config);
+  }
+
+  /** 单独抽离的`patch`工具函数 */
+  public patch<T, P>(
+    url: string,
+    params?: AxiosRequestConfig<P>,
+    config?: PureHttpRequestConfig
+  ): Promise<T> {
+    return this.request<T>("patch", url, params, config);
+  }
+
+  /** 单独抽离的`delete`工具函数 */
+  public delete<T, P>(
+    url: string,
+    params?: AxiosRequestConfig<P>,
+    config?: PureHttpRequestConfig
+  ): Promise<T> {
+    return this.request<T>("delete", url, params, config);
   }
 }
 
